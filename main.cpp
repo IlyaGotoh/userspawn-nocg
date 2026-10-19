@@ -128,7 +128,7 @@ void start_user(dbus_uint32_t uid) {
 		write(STDERR_FILENO, "\n", 1);
 		_exit(1);
 	} else if (pid == -1) {
-		std::println("[ERROR] Clone3 failed: {}", strerror(errno));
+		std::println("[ERROR] Fork failed: {}", strerror(errno));
 		return;
 	}
 	std::println("[LOG] Started userspawnrc for user {}", uid);
