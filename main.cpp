@@ -3,10 +3,7 @@
 #include <csignal>
 #include <cstring>
 #include <dbus/dbus.h>
-#include <fcntl.h>
 #include <grp.h>
-#include <limits.h>
-#include <linux/sched.h>
 #include <pwd.h>
 #include <sys/inotify.h>
 #include <sys/syscall.h>
@@ -56,88 +53,7 @@ std::tuple<int, const char*> get_user(DBusMessage* message) {
 	return std::tuple(uid, path);
 }
 
-std::filesystem::path get_cgroup(dbus_uint32_t uid) {
-	return std::format("/sys/fs/cgroup/user-{}.userspawn", uid);
-}
-
-void end_cgroup(const std::filesystem::path& cgroup) {
-	debug_print("Ending cgroup {}", cgroup.c_str());
-	// Just a data dump we can write to; see usage later on for clarification
-	static char dump[sizeof(inotify_event) + NAME_MAX + 1];
-
-	// Tell the cgroup to kys
-	debug_print("Killing cgroup");
-	std::ofstream kill_file(cgroup / "cgroup.kill");
-	if (!kill_file) {
-		std::println("Failed to open cgroup kill file! Unable to cleanup! {}, {}", cgroup.string(), strerror(errno));
-		return;
-	}
-	kill_file << "1";
-	kill_file.flush();
-	if (!kill_file) {
-		std::println("Failed to write to cgroup kill file! Unable to cleanup! {}, {}", cgroup.string(), strerror(errno));
-		return;
-	}
-	kill_file.close();
-	debug_print("Wrote kill");
-
-	// Yield until the cgroup's processes are cleaned up
-	// populated 0 will appear in the file, when it has finished
-	// Pretty good resource for inotify: https://developer.ibm.com/tutorials/l-inotify/
-	auto events = cgroup / "cgroup.events";
-	int fd = inotify_init();
-	inotify_add_watch(fd, events.c_str(), IN_MODIFY);
-	debug_print("Added watcher");
-
-	while (true) {
-		// Check if populated 0 is set
-		std::ifstream file(events);
-		std::string line;
-		bool empty = false;
-		while (std::getline(file, line)) {
-			// The populated field is recursive, i.e, it will only be 0 when all the child cgroups are too
-			// https://www.kernel.org/doc/html/v4.18/admin-guide/cgroup-v2.html#un-populated-notification
-			if (line == "populated 0") {
-				debug_print("No more children");
-				goto done;
-			}
-		}
-
-		// Blocks until cgroup.events is changed, hence this isn't a busy loop
-		// We don't need this data, but we need to read it into a buffer, for correct yielding
-		// https://man7.org/linux/man-pages/man7/inotify.7.html
-		debug_print("Still has children, yielding");
-		read(fd, dump, sizeof(dump));
-	}
-done:
-	close(fd);
-	debug_print("Closed inotify fd");
-
-	// Cgroups can only be removed, if they have no child cgroups
-	// Therefore, we must remove them bottom up
-	// https://man7.org/linux/man-pages/man7/cgroups.7.html
-	std::vector<std::filesystem::path> cgroups;
-	for (auto& entry : std::filesystem::recursive_directory_iterator(cgroup)) {
-		if (entry.is_directory()) {
-			cgroups.push_back(entry.path());
-		}
-	}
-	std::ranges::reverse(cgroups);
-	for (auto& subcgroup : cgroups) {
-		debug_print("Removing subcgroup {}", subcgroup.c_str());
-		std::filesystem::remove(subcgroup);
-	}
-	std::filesystem::remove(cgroup);
-	debug_print("Removed primary cgroup {}", cgroup.c_str());
-}
-
 void start_user(dbus_uint32_t uid) {
-	auto cgroup = get_cgroup(uid);
-	if (std::filesystem::exists(cgroup)) {
-		std::println("[WARNING] A start user request was received, but the cgroup already exists. "
-					 "This should never occur, perhaps a cleanup was unable to run before? It will be regenerated.");
-		end_cgroup(cgroup);
-	}
 
 	// Usually this is called pw,but that doesn't really make sense anymore
 	passwd* entry = getpwuid(uid);
@@ -178,28 +94,7 @@ void start_user(dbus_uint32_t uid) {
 		nullptr,
 	};
 
-	std::filesystem::create_directory(cgroup);
-	if (chown(cgroup.c_str(), entry->pw_uid, entry->pw_gid) != 0) {
-		std::println("[ERROR] Failed to chown cgroup {}: {}", cgroup.c_str(), strerror(errno));
-		return;
-	}
-	int cgroup_fd = open(cgroup.c_str(), O_RDONLY | O_DIRECTORY);
-	debug_print("Created, chown'ed and opened cgroup");
-
-	// Clone directly into the cgroup
-	clone_args args = {};
-	args.flags = CLONE_INTO_CGROUP;
-	args.cgroup = cgroup_fd;
-	// Should already be 0-init, but just making this explicit
-	// as quoted 'If no signal (i.e., zero) is specified, then the
-	// parent process is not signaled when the child terminates.'
-	// This shouldn't(?) matter anyway, since we set sigchild to sig_ign,
-	// but can't hurt
-	args.exit_signal = 0;
-	debug_print("About to syscall clone into");
-
-	// https://man7.org/linux/man-pages/man2/clone.2.html
-	pid_t pid = syscall(SYS_clone3, &args, sizeof(args));
+	pid_t pid = fork();
 	if (pid == 0) {
 		// Drop permissions
 		// Also gives supplementary groups, beyond just the primary
@@ -236,18 +131,11 @@ void start_user(dbus_uint32_t uid) {
 		std::println("[ERROR] Clone3 failed: {}", strerror(errno));
 		return;
 	}
-	close(cgroup_fd);
 	std::println("[LOG] Started userspawnrc for user {}", uid);
 }
 
 void end_user(dbus_uint32_t uid) {
-	auto cgroup = get_cgroup(uid);
-	if (std::filesystem::exists(cgroup)) {
-		end_cgroup(cgroup);
-	} else {
-		std::println("[LOG] Not cleaning up cgroup {} for uid {}, as it didn't exist!", cgroup.c_str(), uid);
-	}
-	std::println("[LOG] Cleaned up {} for uid {}", cgroup.c_str(), uid);
+	std::println("[LOG] User {} was removed", uid);
 }
 
 int main() {
