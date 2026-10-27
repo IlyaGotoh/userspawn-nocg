@@ -151,7 +151,7 @@ void end_user(dbus_uint32_t uid) {
 		if (s->uid == uid) {
 			// Send SIGTERM to child process
 			if (kill(s->pid, 15) == -1) {
-				std::println("[LOG] Can not terminate: user process PID {} does not exist", s->pid);
+				std::println("[WARNING] Can not terminate user process: PID {} does not exist", s->pid);
 			} else {
 				std::println("[LOG] Terminated user process PID {}", s->pid);
 			}
