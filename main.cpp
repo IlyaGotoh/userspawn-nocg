@@ -63,9 +63,6 @@ std::tuple<int, const char*> get_user(DBusMessage* message) {
 }
 
 void start_user(dbus_uint32_t uid) {
-	if (uid == 0) {
-		return;
-	};
 
 	// Usually this is called pw,but that doesn't really make sense anymore
 	passwd* entry = getpwuid(uid);
@@ -154,9 +151,9 @@ void end_user(dbus_uint32_t uid) {
 		if (s->uid == uid) {
 			// Send SIGTERM to child process
 			if (kill(s->pid, 15) == -1) {
-				std::println("[LOG] The target user process does not exist: PID {}", s->pid);
+				std::println("[LOG] Can not terminate: user process PID {} does not exist", s->pid);
 			} else {
-				std::println("[LOG] Killed user process: PID {}", s->pid);
+				std::println("[LOG] Terminated user process PID {}", s->pid);
 			}
 			sessions.erase(s);
 			return;
