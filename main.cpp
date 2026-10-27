@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <list>
 #include <dbus/dbus.h>
 #include <grp.h>
 #include <pwd.h>
@@ -15,6 +16,14 @@ constexpr bool debug = false;
 #else
 constexpr bool debug = true;
 #endif
+
+struct user_st {
+	uint32_t uid;
+	pid_t pid;
+	struct user_st* next;
+};
+
+std::list<user_st> sessions;
 
 template<typename... Arguments>
 void debug_print(std::format_string<Arguments...> to_format, Arguments&&... arguments) {
@@ -54,6 +63,9 @@ std::tuple<int, const char*> get_user(DBusMessage* message) {
 }
 
 void start_user(dbus_uint32_t uid) {
+	if (uid == 0) {
+		return;
+	};
 
 	// Usually this is called pw,but that doesn't really make sense anymore
 	passwd* entry = getpwuid(uid);
@@ -131,10 +143,26 @@ void start_user(dbus_uint32_t uid) {
 		std::println("[ERROR] Fork failed: {}", strerror(errno));
 		return;
 	}
-	std::println("[LOG] Started userspawnrc for user {}", uid);
+	
+	sessions.push_back({uid, pid});
+
+	std::println("[LOG] Started userspawnrc for user {}, PID {}", uid, pid);
 }
 
 void end_user(dbus_uint32_t uid) {
+	for (auto s = sessions.begin(); s != sessions.end(); s++) {
+		if (s->uid == uid) {
+			// Send SIGTERM to child process
+			if (kill(s->pid, 15) == -1) {
+				std::println("[LOG] The target user process does not exist: PID {}", s->pid);
+			} else {
+				std::println("[LOG] Killed user process: PID {}", s->pid);
+			}
+			sessions.erase(s);
+			return;
+		}
+	}
+
 	std::println("[LOG] User {} was removed", uid);
 }
 
